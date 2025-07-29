@@ -1,0 +1,123 @@
+% Generalized Debiased Semi-Supervised Hashing for Large-Scale Image Retrieval 
+function map = GDSH(kkk,ratio,dataset,bits,beta1,beta,mu,theta,rho,alpha,lr,npl) 
+    map = zeros(length(bits), 5);
+    tag = 1;
+
+    %% load data, top-1 pseudo-labels and kernelized features
+    file=strcat('pre_compute4GDSH_',dataset);
+    if strcmp(dataset,'COCO')
+        file=strcat('pre_compute4GDSH_realValue_',dataset); 
+    end
+    if strcmp(dataset,'NUS_WIDE')
+        file=strcat('pre_compute4GDSH_realValue_',dataset); 
+    end
+
+    file=strcat(file,'_');
+    file=strcat(file,num2str(ratio));
+    file=strcat(file,'%Sup.mat');
+    filesource2='D:\MATLAB\SSUH\DeepFeature_Semi\pre_compute4SSH\';
+    file=strcat(filesource2,file);
+    load(file,'X','LU','L','XX','X_query','X_re','L_query','L_re');
+
+    [d, n] = size(X);
+    [c, ~] = size(L);
+    [~, nu] = size(LU);
+
+    if strcmp(dataset,'COCO')
+        [~,index]=sort(LU,1,'descend'); 
+        LUt = zeros(c, nu);
+        for i=1:nu
+            LUt(index(1:npl,i),i)=1; % 取top-npl伪标签
+        end
+        LU = LUt; 
+        L(:,n-nu+1:n) = LUt;
+    end
+    if strcmp(dataset,'NUS_WIDE')
+        [~,index]=sort(LU,1,'descend'); 
+        LUt = zeros(c, nu);
+        for i=1:nu
+            LUt(index(1:npl,i),i)=1; % 取top-npl伪标签
+        end
+        LU = LUt; 
+        L(:,n-nu+1:n) = LUt;
+    end
+
+    %% parameters setting
+    % beta = 1e-1; % balance term |S-B'AY|
+    % mu = 1e-1; % regularize noise E
+    % theta = 1e-2; % regularize projection A
+    % rho = 1; % positive Lagrange multiplier 
+    % gamma = 1.1; % control the step size of multiplier G
+    % alpha=1e-2; % regularize out-of-sample extension W 
+
+    for r = bits
+        %% record r.
+        map(tag, 1) = r;
+        
+        %% initialization
+        G=zeros(c,nu);
+        E=zeros(c,nu);
+        Y=L; 
+        YU=LU;
+        SL=Y'*Y;
+        S=sign(SL); 
+        A=rand(r,c);
+        B=sign(rand(r,n)-0.5);
+        %% sample S randomly
+        ns = n * lr;
+        id = randperm(n);
+        s_id = id(1:ns);
+        Ss = S(s_id,:);
+        Bs = B(:,s_id);
+        
+        %% train
+        iter=4;
+        iter1=10;
+        
+        for t=1:iter
+            Q1=beta1*(A'*A)+beta*A'*(Bs*Bs')*A+0.5*rho*eye(c);
+            invQ1=pinv(Q1);
+            for tt=1:iter1
+                EE=abs(YU-LU+1/rho*G)-mu/rho*ones(c,nu);
+                E=max(EE,0).*sign(YU-LU+1/rho*G);
+                Q2=beta1*A'*B(:,n-nu+1:n)+beta*A'*Bs*Ss(:,n-nu+1:n)-0.5*G+0.5*rho*(LU+E);
+                YU=max(invQ1*Q2,0);
+                YU=min(YU,1);
+                Y=[L(:,1:n-nu) YU];
+                SL=Y'*Y; 
+                S=sign(SL); 
+                id = randperm(n);
+                s_id = id(1:ns);
+                Ss = S(s_id,:);
+                Bs = B(:,s_id);
+                G=G+rho*(YU-LU-E);
+            end
+            A=sylvester(beta1*eye(r)+beta*(Bs*Bs'),theta*pinv(Y*Y'),(beta1*B*Y'+beta*Bs*Ss*Y')*pinv(Y*Y'));
+            Q3=A*Y;
+            Q4=beta1/beta*A*Y(:,s_id)+Q3*Ss';
+            B(:,s_id) = DCC(Q3,Q4,Bs,r); 
+            B(:,setdiff((1:n),s_id)) = sign(A*Y(:,setdiff((1:n),s_id))); 
+            %B = DCC(Q3,Q4,B,r);
+        end
+        
+        %% test
+        W = pinv(XX+alpha*eye(d))*X*B';
+        B_te=X_query*W>0;
+        B_re=X_re*W>0;
+        mAP=EvaMAPK(kkk,L_re,L_query,B_te,B_re);
+        map(tag, 2) = mAP;
+        
+        Precision=EvaPreK(kkk,L_re,L_query,B_te,B_re);
+        map(tag, 3) = Precision;
+        
+        mAPH2=EvaHmAP(L_re,L_query,B_te,B_re,2);
+        map(tag, 4) = mAPH2;
+        
+        PreH2=EvaHPR(L_re,L_query,B_te,B_re,2);
+        map(tag, 5) = PreH2;
+        
+        tag = tag + 1;
+        
+    end
+
+end
